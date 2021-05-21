@@ -45,6 +45,9 @@ class Parameter:
     def build(self, **kwargs):
         self.hbox.addWidget(QtWidgets.QLabel(self.label))
 
+    def set_from_args(self, args):
+        pass
+
 
 class NumericParameter(Parameter):
     """Parameter with a numerical value."""
@@ -76,9 +79,11 @@ class NumericParameter(Parameter):
         return f'{self.switch}={return_value:g}' if (self.essential or value != self.default) else ''
 
     def set_from_args(self, args):
+        print(self.switch, 'NP')
         convert = float if self.units else int
-        value = convert(args[self.switch])
+        value = convert(args[self.switch]) if self.switch in args else self.default
         self.control.setValue(value * (1000 if self.units == 'mm' else 1))
+        super().set_from_args(args)
 
 
 class OnOffParameter(Parameter):
@@ -100,6 +105,7 @@ class OnOffParameter(Parameter):
 
     def set_from_args(self, args):
         self.checkbox.setChecked(self.switch in args)
+        super().set_from_args(args)
 
 
 class OptionalNumericParameter(NumericParameter, OnOffParameter):
@@ -120,10 +126,7 @@ class OptionalNumericParameter(NumericParameter, OnOffParameter):
         return f'{self.switch}={return_value:g}' if self.checkbox.isChecked() else ''
 
     def set_from_args(self, args):
-        try:
-            super().set_from_args()
-        except KeyError:
-            pass
+        super().set_from_args(args)
 
 
 class ChoiceParameter(Parameter):
@@ -148,7 +151,8 @@ class ChoiceParameter(Parameter):
         return f'{self.switch}={value}' if (self.essential or value != 2) else ''
 
     def set_from_args(self, args):
-        self.control.setCurrentIndex(self.VALUES.index(int(args[self.switch])))
+        self.control.setCurrentIndex(self.VALUES.index(int(args[self.switch])) if self.switch in args else 1)
+        super().set_from_args(args)
 
 
 class App(QtWidgets.QWidget):
@@ -213,6 +217,17 @@ class App(QtWidgets.QWidget):
         self.layout = QtWidgets.QVBoxLayout()
         self.listview = QtWidgets.QListWidget()
         self.listview.addItems([', '.join(params) for params in self.state['results'].keys()])
+        for i in range(self.listview.count()):
+            item = self.listview.item(i)
+            try:
+                img_data = self.state['icons'][tuple(item.text().split(', '))]
+                height, width, bpp = img_data.shape
+                image = QtGui.QImage(img_data, width, height, width * bpp, QtGui.QImage.Format_RGB888)
+                icon = QtGui.QIcon(QtGui.QPixmap(image))
+                item.setIcon(icon)
+            except KeyError:  # no icon
+                pass
+
         self.listview.itemClicked.connect(self.listview_item_clicked)
         horiz_layout.addWidget(self.listview)
         horiz_layout.addLayout(self.layout)
@@ -267,26 +282,28 @@ class App(QtWidgets.QWidget):
         self.auto_checkbox.setChecked(False)  # prevent automatically running models while controls are changed
         params = tuple(item.text().split(', '))
         params_dict = dict([param.split('=') for param in params])
-        for switch, (control, checkbox) in self.controls.items():
-            convert = float if isinstance(control, QtWidgets.QDoubleSpinBox) else int
-            if isinstance(control, QtWidgets.QComboBox):  # dropdown, options are always 1, 2, 4
-                control.setCurrentIndex((1, 2, 4).index(int(params_dict[switch])))
-            elif isinstance(checkbox, QtWidgets.QCheckBox):
-                if switch in params_dict.keys():
-                    checkbox.setChecked(True)
-                    if control is not None:
-                        value = convert(params_dict[switch])
-                        control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
-                else:
-                    checkbox.setChecked(False)
-            else:
-                try:
-                    value = convert(params_dict[switch])
-                except KeyError:
-                    value = 0
-                control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
-                if switch == 'ymidplane' and value == 0:
-                    break  # don't bother with the last two
+        for control in self.controls:
+            control.set_from_args(params_dict)
+            # # switch, (control, checkbox)
+            # convert = float if isinstance(control, QtWidgets.QDoubleSpinBox) else int
+            # if isinstance(control, QtWidgets.QComboBox):  # dropdown, options are always 1, 2, 4
+            #     control.setCurrentIndex((1, 2, 4).index(int(params_dict[switch])))
+            # elif isinstance(control.checkbox, QtWidgets.QCheckBox):
+            #     if switch in params_dict.keys():
+            #         checkbox.setChecked(True)
+            #         if control is not None:
+            #             value = convert(params_dict[switch])
+            #             control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
+            #     else:
+            #         checkbox.setChecked(False)
+            # else:
+            #     try:
+            #         value = convert(params_dict[switch])
+            #     except KeyError:
+            #         value = 0
+            #     control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
+            #     if switch == 'ymidplane' and value == 0:
+            #         break  # don't bother with the last two
 
         self.auto_checkbox.setChecked(was_checked)
         self.run_simulation()
