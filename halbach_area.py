@@ -27,11 +27,128 @@ cmd = [winpty, '-Xallow-non-tty', '-Xplain', halbach_exe] if os.path.exists(winp
 
 
 class MplCanvas(FigureCanvasQTAgg):
-
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
         self.axes = fig.add_subplot(111)
         super(MplCanvas, self).__init__(fig)
+
+
+class Parameter:
+    """Base class for a parameter defining how to build our magnet."""
+    def __init__(self, switch, label, essential=False):
+        self.switch = switch
+        self.label = label
+        self.essential = essential
+        self.type = self.control = None
+        self.hbox = QtWidgets.QHBoxLayout()
+
+    def build(self, **kwargs):
+        self.hbox.addWidget(QtWidgets.QLabel(self.label))
+
+
+class NumericParameter(Parameter):
+    """Parameter with a numerical value."""
+    def __init__(self, switch, label, default, units, step=1, essential=False, **kwargs):
+        super().__init__(switch, label, essential)
+        self.default = default
+        self.units = units
+        self.step = step
+
+    def build(self, change_function, **kwargs):
+        """Add control to GUI."""
+        super().build(change_function=change_function, **kwargs)
+        self.add_spin_box(change_function)
+        return self.hbox
+
+    def add_spin_box(self, change_function):
+        digits = 1 if self.units == 'mm' else 2
+        self.control = QtWidgets.QDoubleSpinBox(decimals=digits) if self.units else QtWidgets.QSpinBox()
+        self.control.setRange(0, 10000)
+        self.control.setSingleStep(self.step)
+        self.control.setSuffix(f' {self.units}' if self.units else '')
+        self.control.setValue(self.default)
+        self.control.valueChanged.connect(change_function)
+        self.hbox.addWidget(self.control)
+
+    def get_arg(self):
+        value = self.control.value()
+        return_value = value * (0.001 if self.units == 'mm' else 1)
+        return f'{self.switch}={return_value:g}' if (self.essential or value != self.default) else ''
+
+    def set_from_args(self, args):
+        convert = float if self.units else int
+        value = convert(args[self.switch])
+        self.control.setValue(value * (1000 if self.units == 'mm' else 1))
+
+
+class OnOffParameter(Parameter):
+    """Checkbox on/off parameter."""
+
+    def __init__(self, switch, label, checked=False, **kwargs):
+        super().__init__(switch, label, **kwargs)
+        self.checkbox = QtWidgets.QCheckBox(self.label)
+        self.checkbox.setChecked(checked)
+
+    def build(self, change_function):
+        """Add control to GUI."""
+        self.hbox.addWidget(self.checkbox)
+        self.checkbox.clicked.connect(change_function)
+        return self.hbox
+
+    def get_arg(self):
+        return f'{self.switch}=1' if self.checkbox.isChecked() else ''
+
+    def set_from_args(self, args):
+        self.checkbox.setChecked(self.switch in args)
+
+
+class OptionalNumericParameter(NumericParameter, OnOffParameter):
+    """Optional parameter with a numerical value."""
+    def __init__(self, switch, label, default, units, step=1, checked=False, **kwargs):
+        super().__init__(switch, label, default, units, checked=checked, step=step, essential=False, **kwargs)
+        self.checkbox.setChecked(checked)  # OOP doesn't get passed the 'checked' parameter...
+
+    def build(self, change_function, **kwargs):
+        """Add control to GUI."""
+        super().build(change_function=change_function, **kwargs)  # checkbox, then spinbox
+        self.control.valueChanged.connect(partial(self.checkbox.setChecked, True))
+        return self.hbox
+
+    def get_arg(self):
+        value = self.control.value()
+        return_value = value * (0.001 if self.units == 'mm' else 1)
+        return f'{self.switch}={return_value:g}' if self.checkbox.isChecked() else ''
+
+    def set_from_args(self, args):
+        try:
+            super().set_from_args()
+        except KeyError:
+            pass
+
+
+class ChoiceParameter(Parameter):
+    """Parameter with fixed choices."""
+    VALUES = (1, 2, 4)
+
+    def __init__(self, switch, label, choices, essential=False):
+        super().__init__(switch, label, essential)
+        self.choices = choices
+
+    def build(self, change_function):
+        super().build()
+        self.control = QtWidgets.QComboBox()
+        [self.control.addItem(i) for i in self.choices]
+        self.control.setCurrentIndex(1)  # default is always middle option
+        self.control.currentIndexChanged.connect(change_function)
+        self.hbox.addWidget(self.control)
+        return self.hbox
+
+    def get_arg(self):
+        value = self.VALUES[self.control.currentIndex()]
+        return f'{self.switch}={value}' if (self.essential or value != 2) else ''
+
+    def set_from_args(self, args):
+        self.control.setCurrentIndex(self.VALUES.index(int(args[self.switch])))
 
 
 class App(QtWidgets.QWidget):
@@ -39,13 +156,14 @@ class App(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.title = app_name
-        self.auto_checkbox = self.mid_wedges = self.mid_symmetry = self.layout = self.controls = self.plot = None
+        self.auto_checkbox = self.layout = self.controls = self.plot = None
+        self.mid_remove = self.remove_adjacent = self.midplane_height = None
         self.listview = None
         try:
             self.state = pickle.load(bz2.open(state_file, 'rb'))
         except:
             self.state = {'results': {}, 'icons': {}}
-        self.status_bar = self.run_button = self.progress_bar = None
+        self.status_bar = self.run_button = self.delete_button = self.progress_bar = None
         self.init_ui()
 
     def appendControl(self, name, default, switch, units=None, checked=None, digits=2, step=1):
@@ -76,7 +194,7 @@ class App(QtWidgets.QWidget):
             checkbox.setChecked(checked)
             if control is not None:
                 control.valueChanged.connect(partial(self.spinbox_changed, checkbox))
-                checkbox.clicked.connect(self.checkbox_changed)
+                checkbox.clicked.connect(self.multipoles_checked)
             else:
                 checkbox.clicked.connect(self.autorun)
         hbox.addWidget(checkbox)
@@ -98,25 +216,24 @@ class App(QtWidgets.QWidget):
         self.listview.itemClicked.connect(self.listview_item_clicked)
         horiz_layout.addWidget(self.listview)
         horiz_layout.addLayout(self.layout)
-        self.controls = {}
 
-        self.appendControl('Radius', 5, 'R', 'mm', digits=1)
-        self.appendControl('Good field region', 3, 'gfr', 'mm', False, digits=1)
-        self.appendControl('Dipole', 0.2, 'dipole', 'T', False, step=0.1)
-        self.appendControl('Quadrupole', 300, 'quad', 'T/m', True, step=10)
-        self.appendControl('Sextupole', 66, 'sext', 'T/m²', False, step=10)
-        self.appendControl('Octupole', 888, 'oct', 'T/m³', False, step=10)
-        self.appendControl('Remanent field', 1.07, 'Br', 'T', step=0.1)
-        self.appendControl('Wedges', 16, 'wedges', digits=0, step=4)
-        self.appendControl('Symmetry', '2', 'symmetry', step=['None', 'Top/bottom', 'Quad'])
-        self.appendControl('Offset by half-width', False, 'halfoff', checked=False, step=None)
-        mhh_dropdown = self.appendControl('Midplane half-height', 0, 'ymidplane', 'mm', digits=2)
-        mhh_dropdown.valueChanged.connect(self.check_midplane_controls)
-        self.mid_symmetry = self.appendControl('Remove midplanes', '2', 'midplanes',
-                                               step=['Left only', 'Horizontal', 'Cross'])
-        self.mid_wedges = self.appendControl('Remove wedges by midplane', False, 'removeadjacent', checked=False,
-                                             step=None)
-        self.check_midplane_controls(0)
+        self.midplane_height = NumericParameter('ymidplane', 'Midplane half-height', 0, 'mm')
+        self.mid_remove = ChoiceParameter('midplanes', 'Remove midplanes', ['Left only', 'Horizontal', 'Cross'])
+        self.remove_adjacent = OnOffParameter('removeadjacent', 'Remove wedges by midplane')
+        self.controls = [
+            NumericParameter('R', 'Radius', 5, 'mm', essential=True),
+            OptionalNumericParameter('gfr', 'Good field region', 3, 'mm'),
+            OptionalNumericParameter('dipole', 'Dipole', 0.2, 'T', step=0.1, checked=True),
+            OptionalNumericParameter('quad', 'Quadrupole', 300, 'T/m', step=10),
+            OptionalNumericParameter('sext', 'Sextupole', 60, 'T/m²', step=10),
+            OptionalNumericParameter('oct', 'Octupole', 900, 'T/m³', step=10),
+            NumericParameter('Br', 'Remanent field', 1.07, 'T', step=0.1),
+            NumericParameter('wedges', 'Wedges', 16, '', step=4),
+            ChoiceParameter('symmetry', 'Symmetry', ['None', 'Top/bottom', 'Quad']),
+            OnOffParameter('halfoff', 'Offset by half-width'),
+            self.midplane_height, self.mid_remove, self.remove_adjacent]
+
+        [self.layout.addLayout(control.build(self.autorun)) for control in self.controls]
 
         hbox = QtWidgets.QHBoxLayout()
         self.auto_checkbox = QtWidgets.QCheckBox('Auto')
@@ -124,7 +241,10 @@ class App(QtWidgets.QWidget):
         hbox.addWidget(self.auto_checkbox)
         self.run_button = QtWidgets.QPushButton('Run')
         self.run_button.clicked.connect(self.run_simulation)
+        self.delete_button = QtWidgets.QPushButton('Delete')
+        self.delete_button.clicked.connect(self.delete_case)
         hbox.addWidget(self.run_button)
+        hbox.addWidget(self.delete_button)
         self.layout.addLayout(hbox)
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setMaximum(25)
@@ -148,77 +268,74 @@ class App(QtWidgets.QWidget):
         params = tuple(item.text().split(', '))
         params_dict = dict([param.split('=') for param in params])
         for switch, (control, checkbox) in self.controls.items():
+            convert = float if isinstance(control, QtWidgets.QDoubleSpinBox) else int
             if isinstance(control, QtWidgets.QComboBox):  # dropdown, options are always 1, 2, 4
                 control.setCurrentIndex((1, 2, 4).index(int(params_dict[switch])))
-            elif control is None:  # checkbox only
-                checkbox.setChecked(switch in params_dict.keys())
-            else:  # spinbox
+            elif isinstance(checkbox, QtWidgets.QCheckBox):
+                if switch in params_dict.keys():
+                    checkbox.setChecked(True)
+                    if control is not None:
+                        value = convert(params_dict[switch])
+                        control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
+                else:
+                    checkbox.setChecked(False)
+            else:
                 try:
-                    convert = float if isinstance(control, QtWidgets.QDoubleSpinBox) else int
-                    checkbox.setChecked(switch in params_dict.keys())
                     value = convert(params_dict[switch])
-                    control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
-                except (KeyError, AttributeError):  # no checkbox or param not specified
-                    if switch == 'ymidplane':
-                        break  # don't bother with the last two
+                except KeyError:
+                    value = 0
+                control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
+                if switch == 'ymidplane' and value == 0:
+                    break  # don't bother with the last two
+
         self.auto_checkbox.setChecked(was_checked)
         self.run_simulation()
 
-    def check_midplane_controls(self, value):
+    def check_midplane_controls(self):
         """Grey out midplane controls when midplane gap is set to zero."""
-        self.mid_wedges.setEnabled(value > 0)
-        self.mid_symmetry.setEnabled(value > 0)
-
-    def spinbox_changed(self, checkbox):
-        """Check the relevant box when one of the spinboxes is changed."""
-        checkbox.setChecked(True)
-        self.autorun()
+        value = self.midplane_height.control.value()
+        self.mid_remove.control.setEnabled(value > 0)
+        self.remove_adjacent.checkbox.setEnabled(value > 0)
 
     def autorun(self):
         """Run a new simulation when something changes."""
-        if self.auto_checkbox.isChecked() and self.run_button.isEnabled():
+        self.check_midplane_controls()
+        if self.multipoles_checked() and self.auto_checkbox.isChecked() and self.run_button.isEnabled():
             self.run_simulation()
 
-    def checkbox_changed(self):
+    def multipoles_checked(self):
         """Check that at least one multipole is checked."""
-        n_checked = 0
-        for switch, (control, checkbox) in self.controls.items():
-            if checkbox is not None and checkbox.text().endswith('pole') and checkbox.isChecked():
-                n_checked += 1
-        if n_checked == 0:
-            self.status_bar.setText('Select at least one multipole.')
-            self.run_button.setEnabled(False)
-        else:
+        try:
+            next(ctrl for ctrl in self.controls if ctrl.label.endswith('pole') and ctrl.get_arg())
             self.status_bar.setText('Ready.')
             self.run_button.setEnabled(True)
-            self.autorun()
+            return True
+        except StopIteration:  # none checked
+            self.status_bar.setText('Select at least one multipole.')
+            self.run_button.setEnabled(False)
+            return False
 
     def run_simulation(self):
         """Run the simulation using specified parameters."""
         args = []
         colour = [0, 0, 0]
         # add command-line arguments
-        for switch, (control, checkbox) in self.controls.items():
-            if checkbox is None or checkbox.isChecked():
-                if control is None:  # just a checkbox
-                    value = 1
-                elif isinstance(control, QtWidgets.QComboBox):  # dropdown, options are always 1, 2, 4
-                    value = (1, 2, 4)[control.currentIndex()]
-                else:  # spinbox
-                    value = control.value() * (0.001 if control.suffix() == ' mm' else 1)
-                    try:
-                        colour[('dipole', 'sext', 'quad').index(switch)] += 1  # dipoles are red, quadrupoles are blue
-                    except ValueError:
-                        pass
-                if switch == 'ymidplane' and value == 0:
-                    break  # don't bother with the last two
-                args.append(f'{switch}={value:g}')  # g here removes trailing zeros
+        args = list(filter(None, [control.get_arg() for control in self.controls]))
+        print(args)
+        print(', '.join(args))
+        colour = [(0.8 if control.get_arg() else 0) for control in self.controls if control.label.endswith('pole')]
+        colour[2] += (0.2 if colour[3] else 0)  # fudge to combine octupole + sextupole
+        colour.pop(3)  # remove last
+
         args = tuple(args)  # make it hashable so it can be a dict key
+        print(args)
         if args not in self.state['results'].keys():
+            print('Running')
             self.status_bar.setText('Running...')
             self.progress_bar.setValue(0)
             self.run_button.setEnabled(False)
             QtCore.QCoreApplication.processEvents()
+            print(cmd + list(args))
             process = subprocess.Popen(cmd + list(args), stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, universal_newlines=True)
             status_line = re.compile(r'Iteration (\d+)')
@@ -230,10 +347,10 @@ class App(QtWidgets.QWidget):
                 except AttributeError:  # not a line with "Iteration X" in it
                     pass
                 self.status_bar.setText(stdout)
-                # print(stdout, end='')
+                print(stdout, end='')
                 failed |= 'ERROR' in stdout
                 QtCore.QCoreApplication.processEvents()  # update the GUI
-            # print('')
+            print('')
             self.run_button.setEnabled(True)
             if failed:
                 print(process.returncode)
@@ -250,6 +367,7 @@ class App(QtWidgets.QWidget):
             polygons = np.loadtxt("magnet.csv", skiprows=1, usecols=range(1, 11), delimiter=',') * 1000
             item = self.store_results(args, polygons)
         else:  # use saved result
+            print('using saved result')
             args_str = ', '.join(args)
             for i in range(self.listview.count()):
                 item = self.listview.item(i)
@@ -294,8 +412,20 @@ class App(QtWidgets.QWidget):
         icon = QtGui.QIcon(QtGui.QPixmap(image))
         item.setIcon(icon)
 
+    def delete_case(self):
+        for item in self.listview.selectedItems():
+            params = tuple(item.text().split(', '))
+            try:
+                self.state['results'].pop(params)
+                self.state['icons'].pop(params)
+            except KeyError:
+                pass
+            pickle.dump(self.state, bz2.open(state_file, 'wb'))
+            self.listview.takeItem(self.listview.row(item))
+
     def store_results(self, args, result):
         self.state['results'][args] = result
+        print(self.state['results'].keys())
         self.listview.addItem(', '.join(args))
         item = self.listview.item(self.listview.count() - 1)
         item.setSelected(True)
