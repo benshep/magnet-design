@@ -43,14 +43,16 @@ class Parameter:
         self.hbox = QtWidgets.QHBoxLayout()
 
     def build(self, **kwargs):
+        """Add the control(s) to the GUI."""
         self.hbox.addWidget(QtWidgets.QLabel(self.label))
 
     def set_from_args(self, args):
+        """Set the control value based on a list of arguments to the HalbachArea program."""
         pass
 
 
 class NumericParameter(Parameter):
-    """Parameter with a numerical value."""
+    """Parameter with a numerical value, represented by a spin box."""
     def __init__(self, switch, label, default, units, step=1, essential=False, **kwargs):
         super().__init__(switch, label, essential)
         self.default = default
@@ -58,12 +60,12 @@ class NumericParameter(Parameter):
         self.step = step
 
     def build(self, change_function, **kwargs):
-        """Add control to GUI."""
         super().build(change_function=change_function, **kwargs)
         self.add_spin_box(change_function)
         return self.hbox
 
     def add_spin_box(self, change_function):
+        """Add a spin box to the GUI."""
         digits = 1 if self.units == 'mm' else 2
         self.control = QtWidgets.QDoubleSpinBox(decimals=digits) if self.units else QtWidgets.QSpinBox()
         self.control.setRange(0, 10000)
@@ -74,12 +76,12 @@ class NumericParameter(Parameter):
         self.hbox.addWidget(self.control)
 
     def get_arg(self):
+        """Convert the current value shown in the control to an argument to pass to HalbachArea."""
         value = self.control.value()
         return_value = value * (0.001 if self.units == 'mm' else 1)
         return f'{self.switch}={return_value:g}' if (self.essential or value != self.default) else ''
 
     def set_from_args(self, args):
-        print(self.switch, 'NP')
         convert = float if self.units else int
         value = convert(args[self.switch]) if self.switch in args else self.default
         self.control.setValue(value * (1000 if self.units == 'mm' else 1))
@@ -109,7 +111,7 @@ class OnOffParameter(Parameter):
 
 
 class OptionalNumericParameter(NumericParameter, OnOffParameter):
-    """Optional parameter with a numerical value."""
+    """Optional parameter with a numerical value, represented by a checkbox and a spin box."""
     def __init__(self, switch, label, default, units, step=1, checked=False, **kwargs):
         super().__init__(switch, label, default, units, checked=checked, step=step, essential=False, **kwargs)
         self.checkbox.setChecked(checked)  # OOP doesn't get passed the 'checked' parameter...
@@ -130,7 +132,7 @@ class OptionalNumericParameter(NumericParameter, OnOffParameter):
 
 
 class ChoiceParameter(Parameter):
-    """Parameter with fixed choices."""
+    """Parameter with fixed choices, represented by a dropdown box."""
     VALUES = (1, 2, 4)
 
     def __init__(self, switch, label, choices, essential=False):
@@ -169,43 +171,6 @@ class App(QtWidgets.QWidget):
             self.state = {'results': {}, 'icons': {}}
         self.status_bar = self.run_button = self.delete_button = self.progress_bar = None
         self.init_ui()
-
-    def appendControl(self, name, default, switch, units=None, checked=None, digits=2, step=1):
-        """Add a control.
-        Set checked to True or False for a checkbox, otherwise will be a label.
-        Set step to a list to make a dropdown."""
-        hbox = QtWidgets.QHBoxLayout()
-        if step is None:  # checkbox only
-            control = None
-        elif isinstance(step, list):  # dropdown box
-            control = QtWidgets.QComboBox()
-            [control.addItem(i) for i in step]
-            control.setCurrentIndex(1)
-            change_event = control.currentIndexChanged
-        else:
-            control = QtWidgets.QDoubleSpinBox(decimals=digits) if digits > 0 else QtWidgets.QSpinBox()
-            control.setMaximum(2**31-1)
-            control.setMinimum(0)
-            control.setSingleStep(step)
-            control.setSuffix(f' {units}' if units else '')
-            control.setValue(default)
-            change_event = control.valueChanged
-        if checked is None:  # non-optional control
-            checkbox = QtWidgets.QLabel(name)
-            change_event.connect(self.autorun)
-        else:  # optional so include a checkbox
-            checkbox = QtWidgets.QCheckBox(name)
-            checkbox.setChecked(checked)
-            if control is not None:
-                control.valueChanged.connect(partial(self.spinbox_changed, checkbox))
-                checkbox.clicked.connect(self.multipoles_checked)
-            else:
-                checkbox.clicked.connect(self.autorun)
-        hbox.addWidget(checkbox)
-        hbox.addWidget(control)
-        self.layout.addLayout(hbox)
-        self.controls[switch] = (control, checkbox if checked in (True, False) else None)
-        return checkbox if control is None else control
 
     def init_ui(self):
         self.setWindowTitle(self.title)
@@ -284,26 +249,6 @@ class App(QtWidgets.QWidget):
         params_dict = dict([param.split('=') for param in params])
         for control in self.controls:
             control.set_from_args(params_dict)
-            # # switch, (control, checkbox)
-            # convert = float if isinstance(control, QtWidgets.QDoubleSpinBox) else int
-            # if isinstance(control, QtWidgets.QComboBox):  # dropdown, options are always 1, 2, 4
-            #     control.setCurrentIndex((1, 2, 4).index(int(params_dict[switch])))
-            # elif isinstance(control.checkbox, QtWidgets.QCheckBox):
-            #     if switch in params_dict.keys():
-            #         checkbox.setChecked(True)
-            #         if control is not None:
-            #             value = convert(params_dict[switch])
-            #             control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
-            #     else:
-            #         checkbox.setChecked(False)
-            # else:
-            #     try:
-            #         value = convert(params_dict[switch])
-            #     except KeyError:
-            #         value = 0
-            #     control.setValue(value * (1000 if control.suffix() == ' mm' else 1))
-            #     if switch == 'ymidplane' and value == 0:
-            #         break  # don't bother with the last two
 
         self.auto_checkbox.setChecked(was_checked)
         self.run_simulation()
@@ -334,18 +279,14 @@ class App(QtWidgets.QWidget):
 
     def run_simulation(self):
         """Run the simulation using specified parameters."""
-        args = []
-        colour = [0, 0, 0]
         # add command-line arguments
-        args = list(filter(None, [control.get_arg() for control in self.controls]))
+        args = tuple(filter(None, [control.get_arg() for control in self.controls]))
         print(args)
         print(', '.join(args))
         colour = [(0.8 if control.get_arg() else 0) for control in self.controls if control.label.endswith('pole')]
         colour[2] += (0.2 if colour[3] else 0)  # fudge to combine octupole + sextupole
         colour.pop(3)  # remove last
 
-        args = tuple(args)  # make it hashable so it can be a dict key
-        print(args)
         if args not in self.state['results'].keys():
             print('Running')
             self.status_bar.setText('Running...')
@@ -430,6 +371,7 @@ class App(QtWidgets.QWidget):
         item.setIcon(icon)
 
     def delete_case(self):
+        """Delete button has been clicked - remove a set of arguments from the list."""
         for item in self.listview.selectedItems():
             params = tuple(item.text().split(', '))
             try:
@@ -441,6 +383,7 @@ class App(QtWidgets.QWidget):
             self.listview.takeItem(self.listview.row(item))
 
     def store_results(self, args, result):
+        """Save a new set of arguments to the list."""
         self.state['results'][args] = result
         print(self.state['results'].keys())
         self.listview.addItem(', '.join(args))
