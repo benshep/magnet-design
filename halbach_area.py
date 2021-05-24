@@ -5,6 +5,9 @@ import re
 import subprocess
 import pickle
 import bz2
+import io
+import requests
+import py7zr  # for decompression
 from PyQt5 import QtWidgets, QtCore, QtGui
 from functools import partial
 import matplotlib
@@ -17,6 +20,10 @@ from matplotlib.collections import PatchCollection
 
 app_name = 'HalbachArea'
 halbach_exe = f"{app_name}.exe"
+if not os.path.exists(halbach_exe):
+    compressed_file = io.BytesIO(requests.get('https://stephenbrooks.org/ap/halbacharea/halbacharea.7z').content)
+    py7zr.SevenZipFile(compressed_file).extractall('.')
+
 state_file = f'{app_name}.db'
 # For some reason the output from halbach_exe is buffered so we can't read it until the program completes.
 # I found a workaround but it requires the use of winpty: https://github.com/rprichard/winpty/releases
@@ -234,8 +241,12 @@ class App(QtWidgets.QWidget):
         vert_layout.addWidget(self.status_bar)
 
         self.plot = MplCanvas(self, width=5, height=4, dpi=100)
+        self.plot.setMinimumWidth(300)
         NavigationToolbar(self.plot, self.plot)
         horiz_layout.addWidget(self.plot)
+        horiz_layout.setStretch(0, 1)  # listbox stretches a bit...
+        horiz_layout.setStretch(1, 0)  # controls not at all...
+        horiz_layout.setStretch(2, 3)  # plot stretches more as window expands
 
         self.setLayout(vert_layout)
         self.show()
