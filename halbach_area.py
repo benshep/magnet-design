@@ -18,6 +18,19 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Polygon
 from matplotlib.collections import PatchCollection
 
+try:
+    from operapy import canvas, opera2d
+
+    model = opera2d.get_model_interface()
+    graphing = opera2d.get_graphing_interface(model)
+    post = opera2d.get_post_processing_interface(model)
+except ModuleNotFoundError:
+    canvas = opera2d = model = graphing = post = None
+try:
+    import radia as rad
+except ModuleNotFoundError:
+    rad = None
+
 app_name = 'HalbachArea'
 halbach_exe = f"{app_name}.exe"
 if not os.path.exists(halbach_exe):
@@ -175,7 +188,7 @@ class App(QtWidgets.QWidget):
         try:
             self.state = pickle.load(bz2.open(state_file, 'rb'))
         except:
-            self.state = {'results': {}, 'icons': {}}
+            self.state = {'results': {}, 'icons': {}, 'harmonics': {}}
         self.status_bar = self.run_button = self.delete_button = self.progress_bar = None
         self.init_ui()
 
@@ -226,12 +239,35 @@ class App(QtWidgets.QWidget):
         self.auto_checkbox = QtWidgets.QCheckBox('Auto')
         self.auto_checkbox.setChecked(True)
         hbox.addWidget(self.auto_checkbox)
-        self.run_button = QtWidgets.QPushButton('Run')
+        self.run_button = QtWidgets.QToolButton()
+        self.run_button.setText('▶ Run')
         self.run_button.clicked.connect(self.run_simulation)
-        self.delete_button = QtWidgets.QPushButton('Delete')
+        self.delete_button = QtWidgets.QToolButton()
+        self.delete_button.setText('🗑️ Delete')
         self.delete_button.clicked.connect(self.delete_case)
         hbox.addWidget(self.run_button)
         hbox.addWidget(self.delete_button)
+        self.layout.addLayout(hbox)
+        hbox = QtWidgets.QHBoxLayout()
+        hbox.addWidget(QtWidgets.QLabel('Build model with length'))
+        self.length_spinbox = QtWidgets.QDoubleSpinBox()
+        self.length_spinbox.setSuffix(' mm')
+        self.length_spinbox.setValue(50)
+        self.length_spinbox.setMinimum(1)
+        self.length_spinbox.setSingleStep(5)
+        hbox.addWidget(self.length_spinbox)
+        menu = QtWidgets.QMenu('menu')
+        radia = menu.addAction('Radia', partial(self.menu_clicked, 'Radia'))
+        opera = menu.addAction('Opera 2D', partial(self.menu_clicked, 'Opera 2D'))
+        radia.setEnabled(rad is not None)
+        opera.setEnabled(opera2d is not None)
+        self.build_button = QtWidgets.QToolButton()
+        self.build_button.setPopupMode(1)  # add a dropdown arrow
+        self.build_button.setText('Radia' if rad is not None else 'Opera 2D')
+        self.build_button.setEnabled(rad is not None or opera2d is not None)
+        self.build_button.clicked.connect(self.build_model)
+        self.build_button.setMenu(menu)
+        hbox.addWidget(self.build_button)
         self.layout.addLayout(hbox)
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setMaximum(25)
@@ -240,10 +276,20 @@ class App(QtWidgets.QWidget):
         self.status_bar = QtWidgets.QLabel()
         vert_layout.addWidget(self.status_bar)
 
+        self.tab_control = QtWidgets.QTabWidget()
         self.plot = MplCanvas(self, width=5, height=4, dpi=100)
+        self.tab_control.addTab(self.plot, '2D')
+        pane = QtWidgets.QWidget()
+        hbox = QtWidgets.QHBoxLayout()
+        pane.setLayout(hbox)
+        self.harmonics = [MplCanvas(self, width=2, height=4, dpi=100), MplCanvas(self, width=2, height=4, dpi=100)]
+        hbox.addWidget(self.harmonics[0])
+        hbox.addWidget(self.harmonics[1])
+        self.tab_control.addTab(pane, 'Harmonics')
+
         self.plot.setMinimumWidth(300)
         NavigationToolbar(self.plot, self.plot)
-        horiz_layout.addWidget(self.plot)
+        horiz_layout.addWidget(self.tab_control)  # self.plot)
         horiz_layout.setStretch(0, 1)  # listbox stretches a bit...
         horiz_layout.setStretch(1, 0)  # controls not at all...
         horiz_layout.setStretch(2, 3)  # plot stretches more as window expands
@@ -251,6 +297,9 @@ class App(QtWidgets.QWidget):
         self.setLayout(vert_layout)
         self.show()
         self.autorun()
+
+    def menu_clicked(self, selected_item):
+        self.build_button.setText(selected_item)
 
     def listview_item_clicked(self, item):
         """Set controls for previously-selected parameters from the list box."""
@@ -298,6 +347,7 @@ class App(QtWidgets.QWidget):
         colour[2] += (0.2 if colour[3] else 0)  # fudge to combine octupole + sextupole
         colour.pop(3)  # remove last
 
+        failed = False
         if args not in self.state['results'].keys():
             print('Running')
             self.status_bar.setText('Running...')
@@ -308,7 +358,6 @@ class App(QtWidgets.QWidget):
             process = subprocess.Popen(cmd + list(args), stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, universal_newlines=True)
             status_line = re.compile(r'Iteration (\d+)')
-            failed = False
             while process.poll() is None:
                 stdout = process.stdout.readline()
                 try:
@@ -323,7 +372,6 @@ class App(QtWidgets.QWidget):
             self.run_button.setEnabled(True)
             if failed:
                 print(process.returncode)
-                self.status_bar.setText('Failed.')
                 self.progress_bar.setValue(0)
                 self.store_results(args, None)
                 return
@@ -332,9 +380,10 @@ class App(QtWidgets.QWidget):
 
             # get the magnet shapes from the output CSV file
             # format is Bx, By, x0, y0, x1, y1, x2, y2, x3, y3
-            # Turn into dimensions in mm (and remanent fields in kT, but that doesn't matter)
-            polygons = np.loadtxt("magnet.csv", skiprows=1, usecols=range(1, 11), delimiter=',') * 1000
-            item = self.store_results(args, polygons)
+            # Turn into dimensions in mm
+            polygons = np.loadtxt("magnet.csv", skiprows=1, usecols=range(1, 11), delimiter=',') * ([1, 1] + [1000,] * 8)
+            harmonics = np.loadtxt("magnet_harmonics.csv", delimiter=',')
+            item = self.store_results(args, polygons, harmonics)
         else:  # use saved result
             print('using saved result')
             args_str = ', '.join(args)
@@ -344,42 +393,59 @@ class App(QtWidgets.QWidget):
                     item.setSelected(True)
                     break
             result = self.state['results'][args]
-            if result is None:
-                self.status_bar.setText('Failed.')
-                return
+            failed = result is None
             polygons = result
+            harmonics = self.state['harmonics'][args]
 
-        min_width = min(np.ptp(polygons[:, 2::2], axis=1))
-        min_height = min(np.ptp(polygons[:, 3::2], axis=1))
-        max_b = max(polygons[:, :2].flat)
-        scale = min(min_width, min_height) / max_b  # how to represent Bx/By vectors on graph?
-        self.plot.axes.cla()  # clear axes
-        shapes = [Polygon(polygon[2:10].reshape(4, 2), facecolor=colour, edgecolor='black') for polygon in polygons]
-        self.plot.axes.add_collection(PatchCollection(shapes, match_original=True))
-        # add remanent field vectors
-        for polygon in polygons:
-            bx, by = polygon[:2] * scale
-            self.plot.axes.arrow(np.mean(polygon[2::2]) - bx / 2, np.mean(polygon[3::2]) - by / 2,
-                                 bx, by, width=0.1 * np.sqrt(bx ** 2 + by ** 2), length_includes_head=True)
-        self.plot.axes.set_xlim([min(polygons[:, 2::2].flat), max(polygons[:, 2::2].flat)])
-        self.plot.axes.set_ylim([min(polygons[:, 3::2].flat), max(polygons[:, 3::2].flat)])
-        self.plot.draw()
 
-        try:
-            img_data = self.state['icons'][args]
-        except KeyError:
-            # capture plot image and resize to icon size (around 32 pixels)
-            width, height = self.plot.get_width_height()
-            step = min(height, width) // 32  # how many rows/cols to skip along
-            img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
-            img_data = img_data[::step, ::step, :]
-            img_data = img_data.copy()
-            self.state['icons'][args] = img_data
-            pickle.dump(self.state, bz2.open(state_file, 'wb'))
-        height, width, bpp = img_data.shape
-        image = QtGui.QImage(img_data, width, height, width * bpp, QtGui.QImage.Format_RGB888)
-        icon = QtGui.QIcon(QtGui.QPixmap(image))
-        item.setIcon(icon)
+        self.build_button.setEnabled(not failed)
+        if failed:
+            self.status_bar.setText('Failed.')
+        else:
+            min_width = min(np.ptp(polygons[:, 2::2], axis=1))
+            min_height = min(np.ptp(polygons[:, 3::2], axis=1))
+            max_b = max(polygons[:, :2].flat)
+            scale = min(min_width, min_height) / max_b  # how to represent Bx/By vectors on graph?
+            self.plot.axes.cla()  # clear axes
+            shapes = [Polygon(polygon[2:10].reshape(4, 2), facecolor=colour, edgecolor='black') for polygon in polygons]
+            self.plot.axes.add_collection(PatchCollection(shapes, match_original=True))
+            # add remanent field vectors
+            for polygon in polygons:
+                bx, by = polygon[:2] * scale
+                self.plot.axes.arrow(np.mean(polygon[2::2]) - bx / 2, np.mean(polygon[3::2]) - by / 2,
+                                     bx, by, width=0.1 * np.sqrt(bx ** 2 + by ** 2), length_includes_head=True)
+            self.plot.axes.set_xlim([min(polygons[:, 2::2].flat), max(polygons[:, 2::2].flat)])
+            self.plot.axes.set_ylim([min(polygons[:, 3::2].flat), max(polygons[:, 3::2].flat)])
+            self.plot.draw()
+
+            n_harms = len(harmonics)
+            show = [True, ] * n_harms
+            for i in (1, 0):  # do skew first, and then figure out which not to show for normal
+                self.harmonics[i].axes.cla()  # clear axis
+                self.harmonics[i].axes.barh(range(n_harms), harmonics[:, i])
+                self.harmonics[i].axes.set_xlim(left=min(harmonics[show, i]), right=max(harmonics[show, i]))
+                # main harmonic will be 10^4, not interested in seeing that one for main harmonics
+                for j, multipole in enumerate(('dipole=', 'quad=', 'sext=', 'oct=')):
+                    show[j + 1] = not any(multipole in arg for arg in args)
+                self.harmonics[i].axes.invert_yaxis()
+                self.harmonics[i].axes.set_title('Normal' if i == 0 else 'Skew')
+                self.harmonics[i].draw()
+
+            try:
+                img_data = self.state['icons'][args]
+            except KeyError:
+                # capture plot image and resize to icon size (around 32 pixels)
+                width, height = self.plot.get_width_height()
+                step = min(height, width) // 32  # how many rows/cols to skip along
+                img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
+                img_data = img_data[::step, ::step, :]
+                img_data = img_data.copy()
+                self.state['icons'][args] = img_data
+                pickle.dump(self.state, bz2.open(state_file, 'wb'))
+            height, width, bpp = img_data.shape
+            image = QtGui.QImage(img_data, width, height, width * bpp, QtGui.QImage.Format_RGB888)
+            icon = QtGui.QIcon(QtGui.QPixmap(image))
+            item.setIcon(icon)
 
     def delete_case(self):
         """Delete button has been clicked - remove a set of arguments from the list."""
@@ -393,15 +459,33 @@ class App(QtWidgets.QWidget):
             pickle.dump(self.state, bz2.open(state_file, 'wb'))
             self.listview.takeItem(self.listview.row(item))
 
-    def store_results(self, args, result):
+    def store_results(self, args, result, harmonics):
         """Save a new set of arguments to the list."""
         self.state['results'][args] = result
+        self.state['harmonics'][args] = harmonics
         print(self.state['results'].keys())
         self.listview.addItem(', '.join(args))
         item = self.listview.item(self.listview.count() - 1)
         item.setSelected(True)
         pickle.dump(self.state, bz2.open(state_file, 'wb'))
         return item
+
+    def build_model(self):
+        """Build a Radia or Opera model with the current result set."""
+        length = self.length_spinbox.value()
+        if self.build_button.text() == 'Radia':
+            rad.UtiDelAll()
+            for item in self.listview.selectedItems():
+                magnet = rad.ObjCnt([rad.ObjThckPgn(0, length, polygon[2:].reshape((4, 2)).tolist(), "z",
+                                                    list(polygon[:2]) + [0, ])
+                                     for polygon in self.state['results'][tuple(item.text().split(', '))]])
+                print(magnet)
+                print(rad.ObjDrwVTK(magnet))
+                try:
+                    rad.Solve(magnet, 0.00001, 10000)  # precision and number of iterations
+                    print(rad.FldInt(magnet, 'inf', 'iby', [0, 0, -1], [0, 0, 1]))
+                except RuntimeError:
+                    print('solve error')
 
 
 if __name__ == '__main__':
