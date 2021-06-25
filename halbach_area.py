@@ -7,8 +7,9 @@ import pickle
 import bz2
 import io
 import requests
-import py7zr  # for decompression
-from PyQt5 import QtWidgets, QtCore, QtGui
+from math import factorial
+from zipfile import ZipFile  # for decompression
+from PyQt5 import QtWidgets, QtCore, QtGui, Qt
 from functools import partial
 import matplotlib
 
@@ -17,6 +18,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationTool
 from matplotlib.figure import Figure
 from matplotlib.patches import Polygon
 from matplotlib.collections import PatchCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 try:
     from operapy import canvas, opera2d
@@ -34,8 +36,8 @@ except ModuleNotFoundError:
 app_name = 'HalbachArea'
 halbach_exe = f"{app_name}.exe"
 if not os.path.exists(halbach_exe):
-    compressed_file = io.BytesIO(requests.get('https://stephenbrooks.org/ap/halbacharea/halbacharea.7z').content)
-    py7zr.SevenZipFile(compressed_file).extractall('.')
+    compressed_file = io.BytesIO(requests.get('https://stephenbrooks.org/ap/halbacharea/halbacharea.zip').content)
+    ZipFile(compressed_file).extractall('.')
 
 state_file = f'{app_name}.db'
 # For some reason the output from halbach_exe is buffered so we can't read it until the program completes.
@@ -47,10 +49,23 @@ cmd = [winpty, '-Xallow-non-tty', '-Xplain', halbach_exe] if os.path.exists(winp
 
 
 class MplCanvas(FigureCanvasQTAgg):
-    def __init__(self, parent=None, width=5, height=4, dpi=100):
+    def __init__(self, width=5, height=4, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
         self.axes = fig.add_subplot(111)
-        super(MplCanvas, self).__init__(fig)
+        super().__init__(fig)
+
+
+class MplCanvas3d(QtWidgets.QWidget):
+    def __init__(self, width=5, height=4, dpi=100):
+        super().__init__()
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        self.canvas = FigureCanvasQTAgg(fig)
+        self.axes = fig.add_subplot(111, projection='3d')
+        self.axes.set_position([0, 0, 1, 1])
+
+        layout = QtWidgets.QGridLayout(self)
+        layout.addWidget(self.canvas, 0, 0)
 
 
 class Parameter:
@@ -254,6 +269,7 @@ class App(QtWidgets.QWidget):
         self.length_spinbox.setSuffix(' mm')
         self.length_spinbox.setValue(50)
         self.length_spinbox.setMinimum(1)
+        self.length_spinbox.setMaximum(1000)
         self.length_spinbox.setSingleStep(5)
         hbox.addWidget(self.length_spinbox)
         menu = QtWidgets.QMenu('menu')
@@ -277,15 +293,18 @@ class App(QtWidgets.QWidget):
         vert_layout.addWidget(self.status_bar)
 
         self.tab_control = QtWidgets.QTabWidget()
-        self.plot = MplCanvas(self, width=5, height=4, dpi=100)
+        self.plot = MplCanvas(width=5, height=4, dpi=100)
         self.tab_control.addTab(self.plot, '2D')
         pane = QtWidgets.QWidget()
         hbox = QtWidgets.QHBoxLayout()
         pane.setLayout(hbox)
-        self.harmonics = [MplCanvas(self, width=2, height=4, dpi=100), MplCanvas(self, width=2, height=4, dpi=100)]
+        self.harmonics = [MplCanvas(width=2, height=4, dpi=100), MplCanvas(width=2, height=4, dpi=100)]
         hbox.addWidget(self.harmonics[0])
         hbox.addWidget(self.harmonics[1])
         self.tab_control.addTab(pane, 'Harmonics')
+
+        self.plot3d = MplCanvas3d()
+        self.tab_control.addTab(self.plot3d, '3D')
 
         self.plot.setMinimumWidth(300)
         NavigationToolbar(self.plot, self.plot)
@@ -337,24 +356,25 @@ class App(QtWidgets.QWidget):
             self.run_button.setEnabled(False)
             return False
 
+    def get_colour(self):
+        """Return an RGB colour combination depending on the multipoles present."""
+        colour = [(0.8 if control.get_arg() else 0) for control in self.controls if control.label.endswith('pole')]
+        colour[2] += (0.2 if colour[3] else 0)  # fudge to combine octupole + sextupole
+        colour.pop(3)  # remove last
+        return colour
+
     def run_simulation(self):
         """Run the simulation using specified parameters."""
         # add command-line arguments
         args = tuple(filter(None, [control.get_arg() for control in self.controls]))
-        print(args)
-        print(', '.join(args))
-        colour = [(0.8 if control.get_arg() else 0) for control in self.controls if control.label.endswith('pole')]
-        colour[2] += (0.2 if colour[3] else 0)  # fudge to combine octupole + sextupole
-        colour.pop(3)  # remove last
+        colour = self.get_colour()
 
         failed = False
         if args not in self.state['results'].keys():
-            print('Running')
             self.status_bar.setText('Running...')
             self.progress_bar.setValue(0)
             self.run_button.setEnabled(False)
             QtCore.QCoreApplication.processEvents()
-            print(cmd + list(args))
             process = subprocess.Popen(cmd + list(args), stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, universal_newlines=True)
             status_line = re.compile(r'Iteration (\d+)')
@@ -365,15 +385,12 @@ class App(QtWidgets.QWidget):
                 except AttributeError:  # not a line with "Iteration X" in it
                     pass
                 self.status_bar.setText(stdout)
-                print(stdout, end='')
                 failed |= 'ERROR' in stdout
                 QtCore.QCoreApplication.processEvents()  # update the GUI
-            print('')
             self.run_button.setEnabled(True)
             if failed:
-                print(process.returncode)
                 self.progress_bar.setValue(0)
-                self.store_results(args, None)
+                self.store_results(args, None, None)
                 return
             self.status_bar.setText('Done.')
             self.progress_bar.setValue(self.progress_bar.maximum())
@@ -385,7 +402,6 @@ class App(QtWidgets.QWidget):
             harmonics = np.loadtxt("magnet_harmonics.csv", delimiter=',')
             item = self.store_results(args, polygons, harmonics)
         else:  # use saved result
-            print('using saved result')
             args_str = ', '.join(args)
             for i in range(self.listview.count()):
                 item = self.listview.item(i)
@@ -417,6 +433,8 @@ class App(QtWidgets.QWidget):
             self.plot.axes.set_xlim([min(polygons[:, 2::2].flat), max(polygons[:, 2::2].flat)])
             self.plot.axes.set_ylim([min(polygons[:, 3::2].flat), max(polygons[:, 3::2].flat)])
             self.plot.draw()
+            if self.tab_control.currentIndex() > 1:
+                self.tab_control.setCurrentIndex(0)  # show 2d view if 3d is selected
 
             n_harms = len(harmonics)
             show = [True, ] * n_harms
@@ -438,7 +456,7 @@ class App(QtWidgets.QWidget):
                 width, height = self.plot.get_width_height()
                 step = min(height, width) // 32  # how many rows/cols to skip along
                 img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
-                img_data = img_data[::step, ::step, :]
+                img_data = img_data[::step, 1::step, :]  # start from 1 otherwise we get a tiny vertical line
                 img_data = img_data.copy()
                 self.state['icons'][args] = img_data
                 pickle.dump(self.state, bz2.open(state_file, 'wb'))
@@ -463,7 +481,6 @@ class App(QtWidgets.QWidget):
         """Save a new set of arguments to the list."""
         self.state['results'][args] = result
         self.state['harmonics'][args] = harmonics
-        print(self.state['results'].keys())
         self.listview.addItem(', '.join(args))
         item = self.listview.item(self.listview.count() - 1)
         item.setSelected(True)
@@ -475,17 +492,53 @@ class App(QtWidgets.QWidget):
         length = self.length_spinbox.value()
         if self.build_button.text() == 'Radia':
             rad.UtiDelAll()
-            for item in self.listview.selectedItems():
-                magnet = rad.ObjCnt([rad.ObjThckPgn(0, length, polygon[2:].reshape((4, 2)).tolist(), "z",
-                                                    list(polygon[:2]) + [0, ])
-                                     for polygon in self.state['results'][tuple(item.text().split(', '))]])
-                print(magnet)
-                print(rad.ObjDrwVTK(magnet))
-                try:
-                    rad.Solve(magnet, 0.00001, 10000)  # precision and number of iterations
-                    print(rad.FldInt(magnet, 'inf', 'iby', [0, 0, -1], [0, 0, 1]))
-                except RuntimeError:
-                    print('solve error')
+            item = self.listview.selectedItems()[0]
+            # build magnet geometry
+            magnet = rad.ObjCnt([rad.ObjThckPgn(0, length, pg[2:].reshape((4, 2)).tolist(), "z", list(pg[:2]) + [0, ])
+                                 for pg in self.state['results'][tuple(item.text().split(', '))]])
+            rad.MatApl(magnet, rad.MatStd('NdFeB', next(c for c in self.controls if c.switch == 'Br').control.value()))
+
+            # plot geometry in 3d
+            ax = self.plot3d.axes
+            ax.cla()
+            ax.set_axis_off()
+            polygons = rad.ObjDrwVTK(magnet)['polygons']
+            vertices = np.array(polygons['vertices']).reshape((-1, 3))  # [x, y, z, x, y, z] -> [[x, y, z], [x, y, z]]
+            [set_lim(vertices.min(), vertices.max()) for set_lim in (ax.set_xlim3d, ax.set_ylim3d, ax.set_zlim3d)]
+            vertices = np.split(vertices, np.cumsum(polygons['lengths'])[:-1])  # split to find each face
+            ax.add_collection3d(Poly3DCollection(vertices, linewidths=0.1, edgecolors='black',
+                                                 facecolors=self.get_colour(), alpha=0.2))
+
+            # add arrows
+            magn_data = np.array(rad.ObjM(magnet)).reshape((-1, 6)).T  # reshape to [x, y, z, mx, my, mz]
+            for end in (-1, 1):  # one at each end of the block, not in the middle
+                magn_data[2] = end * length / 2
+                ax.quiver(*magn_data, color='black', lw=1, pivot='middle')
+
+            self.tab_control.setCurrentIndex(2)  # switch to '3d' tab
+
+            # solve the model
+            try:
+                rad.Solve(magnet, 0.00001, 10000)  # precision and number of iterations
+            except RuntimeError:
+                self.status_bar.setText('Radia solve error')
+
+            # get results
+            dx = 0.1
+            multipoles = [i for i, _ in enumerate(c for c in self.controls if c.label.endswith('pole') and c.get_arg())]
+            i = multipoles[-1]
+            labels = ['Dipole', 'Quadrupole', 'Sextupole', 'Octupole']
+            units = ['T.m', 'T', 'T/m', 'T/m²', 'T/m³']
+            xs = np.linspace(-dx, dx, 4)
+            fit_field = np.polyfit(xs / 1000, [rad.Fld(magnet, 'by', [x, 0, 0]) for x in xs], i)
+            fit_int = np.polyfit(xs / 1000, [rad.FldInt(magnet, 'inf', 'iby', [x, 0, -1], [x, 0, 1]) * 0.001 for x in xs], i)
+            text = ''
+            for j, (l, c, ic, u, iu) in enumerate(zip(labels, fit_field[::-1], fit_int[::-1], units[1:], units[:-1])):
+                if j in multipoles:
+                    f = factorial(j)  # 1 for dip, quad; 2 for sext; 6 for oct
+                    text += f'{l} field = {c * f:.3g} {u}, integral = {ic * f:.3g} {iu}, length = {ic / c:.3g} m\n'
+            ax.text2D(1, 1, text, transform=ax.transAxes, va='top', ha='right', fontdict={'size': 8})
+            self.plot3d.canvas.draw()
 
 
 if __name__ == '__main__':
