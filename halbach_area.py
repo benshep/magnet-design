@@ -245,14 +245,27 @@ class App(QtWidgets.QMainWindow):
         # self.setGeometry(self.left, self.top, self.width, self.height)
 
         # Create menu options
-        # menubar = self.menuBar()
-        # menu = QtWidgets.QMenu('Simulation', self) # title and parent
-        # db_action = QtWidgets.QAction("Open file", self) # title and parent
-        # db_action.setStatusTip("Select a file to use as a database")
-        # db_action.triggered.connect(self.open_new_db)
-        # menu.addAction(db_action)
-        # menubar.addMenu(menu)
+        menubar = self.menuBar()
+        menu = QtWidgets.QMenu('&Simulation', self)
+        self.create_menu_item(menu, "&Run", "Run simulation with the current parameters", self.run_simulation)
+        autorun_action = self.create_menu_item(menu, "&Autorun", "Run simulation whenever a change is made", checked=True)
+        menu.addSeparator()
+        self.create_menu_item(menu, "&Clear all", "Clear all saved simulations", lambda: self.delete_case(True))
+        self.create_menu_item(menu, "E&xit", "Exit the program", self.close)
+        menubar.addMenu(menu)
 
+        menu = QtWidgets.QMenu('&Layout', self)
+        self.auto_scale_plot = self.create_menu_item(menu, "Auto scale &plot", "Fit plot to layout bounds", checked=True)
+        self.create_menu_item(menu, "Save &picture", "Save 2D layout as a PNG file", self.get_layout_image)
+        self.auto_save_image = self.create_menu_item(menu, "A&uto save picture", "Save 2D layout after running every simulation")
+        menubar.addMenu(menu)
+        tools_menu = QtWidgets.QMenu('&Tools', self)
+        sweep = self.create_menu_item(tools_menu, "Parameter sweep", "Run a sweep of a given parameter", print)
+        sweep.setEnabled(False)
+
+        self.image_label = QtWidgets.QLabel()
+        self.image_label.linkActivated.connect(self.open_image)
+        self.statusBar().addWidget(self.image_label)
         self.statusBar().showMessage("Ready")
         vert_layout = QtWidgets.QVBoxLayout()
         horiz_layout = QtWidgets.QHBoxLayout()
@@ -291,8 +304,8 @@ class App(QtWidgets.QMainWindow):
         [self.layout.addLayout(control.build(self.autorun)) for control in self.controls]
 
         hbox = QtWidgets.QHBoxLayout()
-        self.auto_checkbox = QtWidgets.QCheckBox('Auto')
-        self.auto_checkbox.setChecked(True)
+        self.auto_checkbox = QtWidgets.QToolButton()
+        self.auto_checkbox.setDefaultAction(autorun_action)
         hbox.addWidget(self.auto_checkbox)
         self.run_button = QtWidgets.QToolButton()
         self.run_button.setText('▶ Run')
@@ -317,6 +330,9 @@ class App(QtWidgets.QMainWindow):
         opera = menu.addAction('Opera 2D', partial(self.menu_clicked, 'Opera 2D'))
         radia.setEnabled(rad is not None)
         opera.setEnabled(opera2d is not None)
+        tools_menu.addSection('Export')
+        tools_menu.addActions([radia, opera])
+        menubar.addMenu(tools_menu)
         self.build_button = QtWidgets.QToolButton()
         self.build_button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
         self.build_button.setText('Radia' if rad is not None else 'Opera 2D')
@@ -359,6 +375,17 @@ class App(QtWidgets.QMainWindow):
         self.setLayout(vert_layout)
         self.show()
         self.autorun()
+
+    def create_menu_item(self, menu, name, description, function=None, checked=False):
+        action = QtWidgets.QAction(name, self)
+        action.setStatusTip(description)
+        action.setCheckable(function is None)
+        if function:
+            action.triggered.connect(function)
+        else:
+            action.setChecked(checked)
+        menu.addAction(action)
+        return action
 
     def menu_clicked(self, selected_item):
         self.build_button.setText(selected_item)
@@ -409,7 +436,7 @@ class App(QtWidgets.QMainWindow):
     def run_simulation(self):
         """Run the simulation using specified parameters."""
         # add command-line arguments
-        args = tuple(filter(None, [control.get_arg() for control in self.controls]))
+        args = self.get_args()
         colour = self.get_colour()
 
         failed = False
@@ -464,6 +491,10 @@ class App(QtWidgets.QMainWindow):
             min_height = min(np.ptp(polys[:, 3::2], axis=1))
             max_b = max(polys[:, :2].flat)
             scale = min(min_width, min_height) / max_b  # how to represent Bx/By vectors on graph?
+            auto_scale = self.auto_scale_plot.isChecked()
+            xlim = [min(polys[:, 2::2].flat), max(polys[:, 2::2].flat)] if auto_scale else self.plot.axes.get_xlim()
+            ylim = [min(polys[:, 3::2].flat), max(polys[:, 3::2].flat)] if auto_scale else self.plot.axes.get_ylim()
+
             self.plot.axes.cla()  # clear axes
             shapes = [Polygon(polygon[2:10].reshape(4, 2), facecolor=colour, edgecolor='black') for polygon in polys]
             self.plot.axes.add_collection(PatchCollection(shapes, match_original=True))
@@ -472,18 +503,14 @@ class App(QtWidgets.QMainWindow):
                 bx, by = polygon[:2] * scale
                 self.plot.axes.arrow(np.mean(polygon[2::2]) - bx / 2, np.mean(polygon[3::2]) - by / 2,
                                      bx, by, width=0.1 * np.sqrt(bx ** 2 + by ** 2), length_includes_head=True)
-            self.plot.axes.set_xlim([-25, 25])  # [min(polys[:, 2::2].flat), max(polys[:, 2::2].flat)])
-            self.plot.axes.set_ylim([-25, 25])  # [min(polys[:, 3::2].flat), max(polys[:, 3::2].flat)])
+            self.plot.axes.set_xlim(xlim)
+            self.plot.axes.set_ylim(ylim)
             self.plot.axes.set_title(args_str)
             self.plot.draw()
             if self.tab_control.currentIndex() > 1:
                 self.tab_control.setCurrentIndex(0)  # show 2d view if 3d is selected
 
-            width, height = self.plot.get_width_height()
-            img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
-            # save the full image (TODO: make this an option somewhere?)
-            # image = get_qimage(img_data)
-            # image.save(f'{args_str}.png')
+            img_data, width, height = self.get_layout_image(save=self.auto_save_image.isChecked())
 
             n_harms = len(harmonics)
             show = [True, ] * n_harms
@@ -511,17 +538,41 @@ class App(QtWidgets.QMainWindow):
             icon = QtGui.QIcon(QtGui.QPixmap(image))
             item.setIcon(icon)
 
-    def delete_case(self):
+    def get_args(self):
+        """Use the application's controls to get a list of arguments."""
+        return tuple(filter(None, [control.get_arg() for control in self.controls]))
+
+    def get_layout_image(self, checked=False, save=True):
+        """Get an image of the 2D layout, and optionally save to a file."""
+        print(save)
+        width, height = self.plot.get_width_height()
+        img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
+        if save:
+            print('saving')
+            filename = ', '.join(self.get_args()) + '.png'
+            get_qimage(img_data).save(filename)
+            self.image_label.setText(f'Saved image as <a href="{filename}">{filename}</a>.')
+        return img_data, width, height
+
+    def open_image(self, url):
+        """Open the image link that was clicked in the status bar."""
+        os.startfile(url)
+
+    def delete_case(self, remove_all=False):
         """Delete button has been clicked - remove a set of arguments from the list."""
-        for item in self.listview.selectedItems():
+        msg_box = QtWidgets.QMessageBox
+        if remove_all and msg_box.question(self, 'Clear all', 'Clear all simulations from the list?',
+                                           msg_box.Yes | msg_box.No, msg_box.No) == msg_box.No:
+            return
+        for item in self.listview.findItems('*', QtCore.Qt.MatchWildcard) if remove_all else self.listview.selectedItems():
             params = tuple(item.text().split(', '))
             try:
                 self.state['results'].pop(params)
                 self.state['icons'].pop(params)
             except KeyError:
                 pass
-            pickle.dump(self.state, bz2.open(state_file, 'wb'))
             self.listview.takeItem(self.listview.row(item))
+        pickle.dump(self.state, bz2.open(state_file, 'wb'))
 
     def store_results(self, args, result, harmonics):
         """Save a new set of arguments to the list."""
@@ -589,5 +640,6 @@ class App(QtWidgets.QMainWindow):
 
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
+    app.setStyle('Fusion')
     ex = App()
     sys.exit(app.exec_())
