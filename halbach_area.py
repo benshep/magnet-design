@@ -9,7 +9,7 @@ import io
 import requests
 from math import factorial
 from zipfile import ZipFile  # for decompression
-from PyQt5 import QtWidgets, QtCore, QtGui, Qt
+from PyQt5 import QtWidgets, QtCore, QtGui
 from functools import partial
 import matplotlib
 
@@ -36,8 +36,10 @@ except ModuleNotFoundError:
 app_name = 'HalbachArea'
 halbach_exe = f"{app_name}.exe"
 if not os.path.exists(halbach_exe):
-    compressed_file = io.BytesIO(requests.get('https://stephenbrooks.org/ap/halbacharea/halbacharea.zip').content)
-    ZipFile(compressed_file).extractall('.')
+    ZipFile(io.BytesIO(requests.get('https://stephenbrooks.org/ap/halbacharea/halbacharea.zip').content)).extractall('.')
+
+mpole_names = ['Dipole', 'Quadrupole', 'Sextupole', 'Octupole']
+units = ['T.m', 'T', 'T/m', 'T/m²', 'T/m³']
 
 state_file = f'{app_name}.db'
 # For some reason the output from halbach_exe is buffered so we can't read it until the program completes.
@@ -46,6 +48,34 @@ state_file = f'{app_name}.db'
 # https://stackoverflow.com/questions/11516258/what-is-the-equivalent-of-unbuffer-program-on-windows
 winpty = 'winpty.exe'
 cmd = [winpty, '-Xallow-non-tty', '-Xplain', halbach_exe] if os.path.exists(winpty) else [halbach_exe, ]
+
+
+class DoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """Subclass of QDoubleSpinBox with an extra context menu option to change the step size."""
+
+    def contextMenuEvent(self, event):
+        """Add an item to the context menu before it's displayed."""
+        QtCore.QTimer.singleShot(0, self.on_timeout)
+        super(DoubleSpinBox, self).contextMenuEvent(event)
+
+    @QtCore.pyqtSlot()
+    def on_timeout(self):
+        """Add an item to the context menu."""
+        menu = self.findChild(QtWidgets.QMenu, 'qt_edit_menu')
+        if menu is not None:
+            first_action = menu.actionAt(QtCore.QPoint())
+            set_step_action = QtWidgets.QAction(f"Set step ({self.singleStep()})", menu, triggered=self.set_step)
+            menu.insertAction(first_action, set_step_action)
+            menu.insertSeparator(first_action)
+
+    @QtCore.pyqtSlot()
+    def set_step(self):
+        """Prompt the user for a step size."""
+        value, ok = QtWidgets.QInputDialog().getDouble(self, "Single step",
+                                                       f"Spin box step amount [{self.suffix().strip()}]:",
+                                                       self.singleStep(), decimals=2)
+        if ok and value:
+            self.setSingleStep(value)
 
 
 class MplCanvas(FigureCanvasQTAgg):
@@ -70,6 +100,7 @@ class MplCanvas3d(QtWidgets.QWidget):
 
 class Parameter:
     """Base class for a parameter defining how to build our magnet."""
+
     def __init__(self, switch, label, essential=False):
         self.switch = switch
         self.label = label
@@ -88,7 +119,8 @@ class Parameter:
 
 class NumericParameter(Parameter):
     """Parameter with a numerical value, represented by a spin box."""
-    def __init__(self, switch, label, default, units, step=1, essential=False, **kwargs):
+
+    def __init__(self, switch, label, default, units, step=1.0, essential=False, **kwargs):
         super().__init__(switch, label, essential)
         self.default = default
         self.units = units
@@ -102,7 +134,7 @@ class NumericParameter(Parameter):
     def add_spin_box(self, change_function):
         """Add a spin box to the GUI."""
         digits = 1 if self.units == 'mm' else 2
-        self.control = QtWidgets.QDoubleSpinBox(decimals=digits) if self.units else QtWidgets.QSpinBox()
+        self.control = DoubleSpinBox(decimals=digits) if self.units else QtWidgets.QSpinBox()
         self.control.setRange(0, 10000)
         self.control.setSingleStep(self.step)
         self.control.setSuffix(f' {self.units}' if self.units else '')
@@ -147,7 +179,8 @@ class OnOffParameter(Parameter):
 
 class OptionalNumericParameter(NumericParameter, OnOffParameter):
     """Optional parameter with a numerical value, represented by a checkbox and a spin box."""
-    def __init__(self, switch, label, default, units, step=1, checked=False, **kwargs):
+
+    def __init__(self, switch, label, default, units, step=1.0, checked=False, **kwargs):
         super().__init__(switch, label, default, units, checked=checked, step=step, essential=False, **kwargs)
         self.checkbox.setChecked(checked)  # OOP doesn't get passed the 'checked' parameter...
 
@@ -192,25 +225,35 @@ class ChoiceParameter(Parameter):
         super().set_from_args(args)
 
 
-class App(QtWidgets.QWidget):
+def get_qimage(img_data):
+    """Take a Numpy array with image data and return a QImage."""
+    height, width, bpp = img_data.shape
+    return QtGui.QImage(img_data, width, height, width * bpp, QtGui.QImage.Format_RGB888)
+
+
+class App(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
         self.title = app_name
-        self.auto_checkbox = self.layout = self.controls = self.plot = None
-        self.mid_remove = self.remove_adjacent = self.midplane_height = None
-        self.listview = None
         try:
             self.state = pickle.load(bz2.open(state_file, 'rb'))
         except:
             self.state = {'results': {}, 'icons': {}, 'harmonics': {}}
-        self.status_bar = self.run_button = self.delete_button = self.progress_bar = None
-        self.init_ui()
 
-    def init_ui(self):
         self.setWindowTitle(self.title)
         # self.setGeometry(self.left, self.top, self.width, self.height)
 
+        # Create menu options
+        # menubar = self.menuBar()
+        # menu = QtWidgets.QMenu('Simulation', self) # title and parent
+        # db_action = QtWidgets.QAction("Open file", self) # title and parent
+        # db_action.setStatusTip("Select a file to use as a database")
+        # db_action.triggered.connect(self.open_new_db)
+        # menu.addAction(db_action)
+        # menubar.addMenu(menu)
+
+        self.statusBar().showMessage("Ready")
         vert_layout = QtWidgets.QVBoxLayout()
         horiz_layout = QtWidgets.QHBoxLayout()
         vert_layout.addLayout(horiz_layout)
@@ -221,8 +264,7 @@ class App(QtWidgets.QWidget):
             item = self.listview.item(i)
             try:
                 img_data = self.state['icons'][tuple(item.text().split(', '))]
-                height, width, bpp = img_data.shape
-                image = QtGui.QImage(img_data, width, height, width * bpp, QtGui.QImage.Format_RGB888)
+                image = get_qimage(img_data)
                 icon = QtGui.QIcon(QtGui.QPixmap(image))
                 item.setIcon(icon)
             except KeyError:  # no icon
@@ -238,10 +280,8 @@ class App(QtWidgets.QWidget):
         self.controls = [
             NumericParameter('R', 'Radius', 5, 'mm', essential=True),
             OptionalNumericParameter('gfr', 'Good field region', 3, 'mm'),
-            OptionalNumericParameter('dipole', 'Dipole', 0.2, 'T', step=0.1, checked=True),
-            OptionalNumericParameter('quad', 'Quadrupole', 300, 'T/m', step=10),
-            OptionalNumericParameter('sext', 'Sextupole', 60, 'T/m²', step=10),
-            OptionalNumericParameter('oct', 'Octupole', 900, 'T/m³', step=10),
+            *[OptionalNumericParameter(n.rstrip('rupole' * i).lower(), n, b, u, step=10 if i else 0.05, checked=not i)
+              for i, (n, b, u) in enumerate(zip(mpole_names, (0.2, 300, 60, 900), units[1:]))],
             NumericParameter('Br', 'Remanent field', 1.07, 'T', step=0.1),
             NumericParameter('wedges', 'Wedges', 16, '', step=4),
             ChoiceParameter('symmetry', 'Symmetry', ['None', 'Top/bottom', 'Quad']),
@@ -278,7 +318,7 @@ class App(QtWidgets.QWidget):
         radia.setEnabled(rad is not None)
         opera.setEnabled(opera2d is not None)
         self.build_button = QtWidgets.QToolButton()
-        self.build_button.setPopupMode(1)  # add a dropdown arrow
+        self.build_button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
         self.build_button.setText('Radia' if rad is not None else 'Opera 2D')
         self.build_button.setEnabled(rad is not None or opera2d is not None)
         self.build_button.clicked.connect(self.build_model)
@@ -289,16 +329,16 @@ class App(QtWidgets.QWidget):
         self.progress_bar.setMaximum(25)
         self.progress_bar.setValue(0)
         self.layout.addWidget(self.progress_bar)
-        self.status_bar = QtWidgets.QLabel()
-        vert_layout.addWidget(self.status_bar)
+        # self.status_bar = QtWidgets.QLabel()
+        # vert_layout.addWidget(self.status_bar)
 
         self.tab_control = QtWidgets.QTabWidget()
-        self.plot = MplCanvas(width=5, height=4, dpi=100)
+        self.plot = MplCanvas()
         self.tab_control.addTab(self.plot, '2D')
         pane = QtWidgets.QWidget()
         hbox = QtWidgets.QHBoxLayout()
         pane.setLayout(hbox)
-        self.harmonics = [MplCanvas(width=2, height=4, dpi=100), MplCanvas(width=2, height=4, dpi=100)]
+        self.harmonics = [MplCanvas(width=2), MplCanvas(width=2)]
         hbox.addWidget(self.harmonics[0])
         hbox.addWidget(self.harmonics[1])
         self.tab_control.addTab(pane, 'Harmonics')
@@ -308,11 +348,14 @@ class App(QtWidgets.QWidget):
 
         self.plot.setMinimumWidth(300)
         NavigationToolbar(self.plot, self.plot)
-        horiz_layout.addWidget(self.tab_control)  # self.plot)
+        horiz_layout.addWidget(self.tab_control)
         horiz_layout.setStretch(0, 1)  # listbox stretches a bit...
         horiz_layout.setStretch(1, 0)  # controls not at all...
         horiz_layout.setStretch(2, 3)  # plot stretches more as window expands
 
+        central_widget = QtWidgets.QWidget()
+        central_widget.setLayout(vert_layout)
+        self.setCentralWidget(central_widget)
         self.setLayout(vert_layout)
         self.show()
         self.autorun()
@@ -348,11 +391,11 @@ class App(QtWidgets.QWidget):
         """Check that at least one multipole is checked."""
         try:
             next(ctrl for ctrl in self.controls if ctrl.label.endswith('pole') and ctrl.get_arg())
-            self.status_bar.setText('Ready.')
+            self.statusBar().showMessage('Ready.')
             self.run_button.setEnabled(True)
             return True
         except StopIteration:  # none checked
-            self.status_bar.setText('Select at least one multipole.')
+            self.statusBar().showMessage('Select at least one multipole.')
             self.run_button.setEnabled(False)
             return False
 
@@ -370,8 +413,19 @@ class App(QtWidgets.QWidget):
         colour = self.get_colour()
 
         failed = False
-        if args not in self.state['results'].keys():
-            self.status_bar.setText('Running...')
+        args_str = ', '.join(args)
+        if args in self.state['results'].keys():  # use saved result
+            for i in range(self.listview.count()):
+                item = self.listview.item(i)
+                if item.text() == args_str:
+                    item.setSelected(True)
+                    break
+            result = self.state['results'][args]
+            failed = result is None
+            polys = result
+            harmonics = self.state['harmonics'][args]
+        else:
+            self.statusBar().showMessage('Running...')
             self.progress_bar.setValue(0)
             self.run_button.setEnabled(False)
             QtCore.QCoreApplication.processEvents()
@@ -384,7 +438,7 @@ class App(QtWidgets.QWidget):
                     self.progress_bar.setValue(int(status_line.match(stdout).group(1)))
                 except AttributeError:  # not a line with "Iteration X" in it
                     pass
-                self.status_bar.setText(stdout)
+                self.statusBar().showMessage(stdout)
                 failed |= 'ERROR' in stdout
                 QtCore.QCoreApplication.processEvents()  # update the GUI
             self.run_button.setEnabled(True)
@@ -392,49 +446,44 @@ class App(QtWidgets.QWidget):
                 self.progress_bar.setValue(0)
                 self.store_results(args, None, None)
                 return
-            self.status_bar.setText('Done.')
+            self.statusBar().showMessage('Done.')
             self.progress_bar.setValue(self.progress_bar.maximum())
 
             # get the magnet shapes from the output CSV file
             # format is Bx, By, x0, y0, x1, y1, x2, y2, x3, y3
             # Turn into dimensions in mm
-            polygons = np.loadtxt("magnet.csv", skiprows=1, usecols=range(1, 11), delimiter=',') * ([1, 1] + [1000,] * 8)
+            polys = np.loadtxt("magnet.csv", skiprows=1, usecols=range(1, 11), delimiter=',') * ([1, 1] + [1000, ] * 8)
             harmonics = np.loadtxt("magnet_harmonics.csv", delimiter=',')
-            item = self.store_results(args, polygons, harmonics)
-        else:  # use saved result
-            args_str = ', '.join(args)
-            for i in range(self.listview.count()):
-                item = self.listview.item(i)
-                if item.text() == args_str:
-                    item.setSelected(True)
-                    break
-            result = self.state['results'][args]
-            failed = result is None
-            polygons = result
-            harmonics = self.state['harmonics'][args]
-
+            item = self.store_results(args, polys, harmonics)
 
         self.build_button.setEnabled(not failed)
         if failed:
-            self.status_bar.setText('Failed.')
+            self.statusBar().showMessage('Failed.')
         else:
-            min_width = min(np.ptp(polygons[:, 2::2], axis=1))
-            min_height = min(np.ptp(polygons[:, 3::2], axis=1))
-            max_b = max(polygons[:, :2].flat)
+            min_width = min(np.ptp(polys[:, 2::2], axis=1))
+            min_height = min(np.ptp(polys[:, 3::2], axis=1))
+            max_b = max(polys[:, :2].flat)
             scale = min(min_width, min_height) / max_b  # how to represent Bx/By vectors on graph?
             self.plot.axes.cla()  # clear axes
-            shapes = [Polygon(polygon[2:10].reshape(4, 2), facecolor=colour, edgecolor='black') for polygon in polygons]
+            shapes = [Polygon(polygon[2:10].reshape(4, 2), facecolor=colour, edgecolor='black') for polygon in polys]
             self.plot.axes.add_collection(PatchCollection(shapes, match_original=True))
             # add remanent field vectors
-            for polygon in polygons:
+            for polygon in polys:
                 bx, by = polygon[:2] * scale
                 self.plot.axes.arrow(np.mean(polygon[2::2]) - bx / 2, np.mean(polygon[3::2]) - by / 2,
                                      bx, by, width=0.1 * np.sqrt(bx ** 2 + by ** 2), length_includes_head=True)
-            self.plot.axes.set_xlim([min(polygons[:, 2::2].flat), max(polygons[:, 2::2].flat)])
-            self.plot.axes.set_ylim([min(polygons[:, 3::2].flat), max(polygons[:, 3::2].flat)])
+            self.plot.axes.set_xlim([-25, 25])  # [min(polys[:, 2::2].flat), max(polys[:, 2::2].flat)])
+            self.plot.axes.set_ylim([-25, 25])  # [min(polys[:, 3::2].flat), max(polys[:, 3::2].flat)])
+            self.plot.axes.set_title(args_str)
             self.plot.draw()
             if self.tab_control.currentIndex() > 1:
                 self.tab_control.setCurrentIndex(0)  # show 2d view if 3d is selected
+
+            width, height = self.plot.get_width_height()
+            img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
+            # save the full image (TODO: make this an option somewhere?)
+            # image = get_qimage(img_data)
+            # image.save(f'{args_str}.png')
 
             n_harms = len(harmonics)
             show = [True, ] * n_harms
@@ -444,7 +493,7 @@ class App(QtWidgets.QWidget):
                 self.harmonics[i].axes.set_xlim(left=min(harmonics[show, i]), right=max(harmonics[show, i]))
                 # main harmonic will be 10^4, not interested in seeing that one for main harmonics
                 for j, multipole in enumerate(('dipole=', 'quad=', 'sext=', 'oct=')):
-                    show[j + 1] = not any(multipole in arg for arg in args)
+                    show[j + 1] = all(multipole not in arg for arg in args)
                 self.harmonics[i].axes.invert_yaxis()
                 self.harmonics[i].axes.set_title('Normal' if i == 0 else 'Skew')
                 self.harmonics[i].draw()
@@ -453,15 +502,12 @@ class App(QtWidgets.QWidget):
                 img_data = self.state['icons'][args]
             except KeyError:
                 # capture plot image and resize to icon size (around 32 pixels)
-                width, height = self.plot.get_width_height()
                 step = min(height, width) // 32  # how many rows/cols to skip along
-                img_data = np.frombuffer(self.plot.tostring_rgb(), dtype=np.uint8).reshape((height, width, 3))
                 img_data = img_data[::step, 1::step, :]  # start from 1 otherwise we get a tiny vertical line
                 img_data = img_data.copy()
                 self.state['icons'][args] = img_data
                 pickle.dump(self.state, bz2.open(state_file, 'wb'))
-            height, width, bpp = img_data.shape
-            image = QtGui.QImage(img_data, width, height, width * bpp, QtGui.QImage.Format_RGB888)
+            image = get_qimage(img_data)
             icon = QtGui.QIcon(QtGui.QPixmap(image))
             item.setIcon(icon)
 
@@ -510,10 +556,10 @@ class App(QtWidgets.QWidget):
                                                  facecolors=self.get_colour(), alpha=0.2))
 
             # add arrows
-            magn_data = np.array(rad.ObjM(magnet)).reshape((-1, 6)).T  # reshape to [x, y, z, mx, my, mz]
+            magnetisation = np.array(rad.ObjM(magnet)).reshape((-1, 6)).T  # reshape to [x, y, z, mx, my, mz]
             for end in (-1, 1):  # one at each end of the block, not in the middle
-                magn_data[2] = end * length / 2
-                ax.quiver(*magn_data, color='black', lw=1, pivot='middle')
+                magnetisation[2] = end * length / 2
+                ax.quiver(*magnetisation, color='black', lw=1, pivot='middle')
 
             self.tab_control.setCurrentIndex(2)  # switch to '3d' tab
 
@@ -521,19 +567,19 @@ class App(QtWidgets.QWidget):
             try:
                 rad.Solve(magnet, 0.00001, 10000)  # precision and number of iterations
             except RuntimeError:
-                self.status_bar.setText('Radia solve error')
+                self.statusBar().showMessage('Radia solve error')
 
             # get results
             dx = 0.1
-            multipoles = [i for i, _ in enumerate(c for c in self.controls if c.label.endswith('pole') and c.get_arg())]
+            multipoles = [mpole_names.index(c.label) for c in self.controls if c.label.endswith('pole') and c.get_arg()]
             i = multipoles[-1]
-            labels = ['Dipole', 'Quadrupole', 'Sextupole', 'Octupole']
-            units = ['T.m', 'T', 'T/m', 'T/m²', 'T/m³']
             xs = np.linspace(-dx, dx, 4)
             fit_field = np.polyfit(xs / 1000, [rad.Fld(magnet, 'by', [x, 0, 0]) for x in xs], i)
-            fit_int = np.polyfit(xs / 1000, [rad.FldInt(magnet, 'inf', 'iby', [x, 0, -1], [x, 0, 1]) * 0.001 for x in xs], i)
+            fit_int = np.polyfit(xs / 1000,
+                                 [rad.FldInt(magnet, 'inf', 'iby', [x, 0, -1], [x, 0, 1]) * 0.001 for x in xs], i)
             text = ''
-            for j, (l, c, ic, u, iu) in enumerate(zip(labels, fit_field[::-1], fit_int[::-1], units[1:], units[:-1])):
+            for j, (l, c, ic, u, iu) in enumerate(
+                    zip(mpole_names, fit_field[::-1], fit_int[::-1], units[1:], units[:-1])):
                 if j in multipoles:
                     f = factorial(j)  # 1 for dip, quad; 2 for sext; 6 for oct
                     text += f'{l} field = {c * f:.3g} {u}, integral = {ic * f:.3g} {iu}, length = {ic / c:.3g} m\n'
